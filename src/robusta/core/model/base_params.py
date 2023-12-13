@@ -38,6 +38,21 @@ class ResourceChartResourceType(Enum):
     Disk = auto()
 
 
+class OverrideGraph(BaseModel):
+    """
+    A class for overriding prometheus graphs
+    :var resource_type: one of: CPU, Memory, Disk (see ResourceChartResourceType)
+    :var item_type: one of: Pod, Node (see ResourceChartItemType)
+    :var query: the prometheusql query you want to run
+    :var values_format: Customize the y-axis labels with one of: Plain, Bytes, Percentage (see ChartValuesFormat)
+    """
+
+    resource_type: str
+    item_type: str
+    query: str
+    values_format: Optional[str]
+
+
 class ActionParams(DocumentedModel):
     """
     Base class for all Action parameter classes.
@@ -54,7 +69,7 @@ class ActionParams(DocumentedModel):
 
 class PodRunningParams(ActionParams):
     """
-    :var url: custom annotations to be used for the running pod/job
+    :var custom_annotations: custom annotations to be used for the running pod/job
     """
 
     custom_annotations: Optional[Dict[str, str]] = None
@@ -117,6 +132,7 @@ class PrometheusParams(ActionParams):
     prometheus_url_query_string: Optional[str] = None
     prometheus_additional_labels: Optional[Dict[str, str]] = None
     add_additional_labels: bool = True
+    prometheus_graphs_overrides: Optional[List[OverrideGraph]] = None
 
     @validator("prometheus_url", allow_reuse=True)
     def validate_protocol(cls, v):
@@ -158,11 +174,12 @@ class PrometheusQueryParams(PrometheusParams):
     """
     :var promql_query: the prometheusql query you want to run
     :var duration: the duration of the query
-
+    :var step: (str) Query resolution step width in duration format or float number of seconds - i.e 100s, 3d, 2w, 170.3
     """
 
     promql_query: str
     duration: Union[PrometheusDateRange, PrometheusDuration]
+    step: Optional[str]
 
 
 class TimedPrometheusParams(PrometheusParams):
@@ -177,7 +194,9 @@ class TimedPrometheusParams(PrometheusParams):
 class CustomGraphEnricherParams(PrometheusParams):
     """
     :var promql_query: Promql query. You can use $pod, $node and $node_internal_ip to template (see example). For more information, see https://prometheus.io/docs/prometheus/latest/querying/basics/
-    :var graph_title: A nicer name for the Prometheus query.
+    :var graph_title: A nicer name for the Prometheus query. The graph_title may include template variables like $name, $namespace, $node, $container etc...
+
+
     :var graph_duration_minutes: Graph duration is minutes.
     :var chart_values_format: Customize the y-axis labels with one of: Plain, Bytes, Percentage (see ChartValuesFormat)
 
@@ -289,3 +308,7 @@ class LogEnricherParams(ActionParams):
     regex_replacement_style: Optional[str] = None
     previous: bool = False
     filter_regex: Optional[str] = None
+
+
+class OomKillParams(ActionParams):
+    attach_logs: Optional[bool] = False

@@ -6,9 +6,10 @@ import threading
 import time
 from typing import Dict, List, Optional, Union
 
+from hikaru.model.rel_1_26 import DaemonSet, Deployment, Job, Node, Pod, ReplicaSet, StatefulSet
 from kubernetes.client import V1Node, V1NodeCondition, V1NodeList, V1Taint
-from hikaru.model.rel_1_26 import Node, Deployment, DaemonSet, StatefulSet, ReplicaSet, Pod, Job
-from robusta.core.discovery.discovery import Discovery, DiscoveryResults
+
+from robusta.core.discovery.discovery import DISCOVERY_STACKTRACE_TIMEOUT_S, Discovery, DiscoveryResults
 from robusta.core.discovery.top_service_resolver import TopLevelResource, TopServiceResolver
 from robusta.core.model.cluster_status import ActivityStats, ClusterStats, ClusterStatus
 from robusta.core.model.env_vars import (
@@ -73,6 +74,7 @@ class RobustaSink(SinkBase):
         self.__prometheus_health_checker = PrometheusHealthChecker(
             discovery_period_sec=self.__discovery_period_sec, global_config=self.get_global_config()
         )
+        self.__pods_running_count: int = 0
         self.__update_cluster_status()  # send runner version initially, then force prometheus alert time periodically.
 
         # start cluster discovery
@@ -89,6 +91,9 @@ class RobustaSink(SinkBase):
         self.__watchdog_thread = threading.Thread(target=self.__discovery_watchdog)
         self.__thread.start()
         self.__watchdog_thread.start()
+
+    def set_cluster_active(self, active: bool):
+        self.dal.set_cluster_active(active)
 
     def __init_service_resolver(self):
         """
@@ -153,6 +158,7 @@ class RobustaSink(SinkBase):
         self.__jobs_cache = None
         self.__helm_releases_cache = None
         self.__namespaces_cache: Dict[str, NamespaceInfo] = {}
+        self.__pods_running_count = 0
 
     def stop(self):
         self.__active = False
@@ -172,7 +178,8 @@ class RobustaSink(SinkBase):
                 self.__publish_single_service(Discovery.create_service_info(new_resource), operation)
             elif isinstance(new_resource, Node):
                 self.__update_node(new_resource, operation)
-            elif isinstance(new_resource, Job):
+            # if the jobs cache isn't initalized you will have exceptions in __update_job
+            elif isinstance(new_resource, Job) and self.__jobs_cache is not None:
                 self.__update_job(new_resource, operation)
         except Exception:
             self.__reset_caches()
@@ -296,6 +303,7 @@ class RobustaSink(SinkBase):
             self.__assert_namespaces_cache_initialized()
             self.__publish_new_namespaces(results.namespaces)
 
+            self.__pods_running_count = results.pods_running_count
             # save the cached services for the resolver.
             RobustaSink.__save_resolver_resources(
                 list(self.__services_cache.values()), list(self.__jobs_cache.values())
@@ -338,7 +346,9 @@ class RobustaSink(SinkBase):
         return node_info
 
     @classmethod
-    def __from_api_server_node(cls, api_server_node: Union[V1Node, Node], pod_requests_list: List[PodResources]) -> NodeInfo:
+    def __from_api_server_node(
+        cls, api_server_node: Union[V1Node, Node], pod_requests_list: List[PodResources]
+    ) -> NodeInfo:
         addresses = api_server_node.status.addresses or []
         external_addresses = [address for address in addresses if "externalip" in address.type.lower()]
         external_ip = ",".join([addr.address for addr in external_addresses])
@@ -349,8 +359,12 @@ class RobustaSink(SinkBase):
         capacity = api_server_node.status.capacity or {}
         allocatable = api_server_node.status.allocatable or {}
         # V1Node and Node use snake case and camelCase respectively, handle this for more than 1 word attributes.
-        creation_ts = getattr(api_server_node.metadata, "creation_timestamp", None) or getattr(api_server_node.metadata, "creationTimestamp", None)
-        version = getattr(api_server_node.metadata, "resource_version", None) or getattr(api_server_node.metadata, "resourceVersion", None)
+        creation_ts = getattr(api_server_node.metadata, "creation_timestamp", None) or getattr(
+            api_server_node.metadata, "creationTimestamp", None
+        )
+        version = getattr(api_server_node.metadata, "resource_version", None) or getattr(
+            api_server_node.metadata, "resourceVersion", None
+        )
         return NodeInfo(
             name=api_server_node.metadata.name,
             node_creation_time=str(creation_ts),
@@ -367,7 +381,7 @@ class RobustaSink(SinkBase):
             pods_count=len(pod_requests_list),
             pods=",".join([pod_req.pod_name for pod_req in pod_requests_list]),
             node_info=cls.__to_node_info(api_server_node),
-            resource_version=int(version) if version else 0
+            resource_version=int(version) if version else 0,
         )
 
     def __publish_new_nodes(self, current_nodes: V1NodeList, node_requests: Dict[str, List[PodResources]]):
@@ -400,9 +414,11 @@ class RobustaSink(SinkBase):
     def __safe_delete_job(self, job_key):
         try:
             # incase remove_deleted_job fails we mark it deleted in cache so our DB atleast has it saved as deleted instead of active
-            self.__jobs_cache[job_key].deleted = True
-            self.dal.remove_deleted_job(self.__jobs_cache[job_key])
-            del self.__jobs_cache[job_key]
+            job_info = self.__jobs_cache.get(job_key, None)
+            if job_info:
+                job_info.deleted = True
+                self.dal.remove_deleted_job(job_info)
+                del self.__jobs_cache[job_key]
         except Exception:
             logging.error(f"Failed to delete job with service key {job_key}", exc_info=True)
 
@@ -484,7 +500,7 @@ class RobustaSink(SinkBase):
             )
 
             self.dal.publish_cluster_status(cluster_status)
-            self.dal.publish_cluster_nodes(cluster_stats.nodes)
+            self.dal.publish_cluster_nodes(cluster_stats.nodes, self.__pods_running_count)
         except Exception:
             logging.exception(
                 f"Failed to run periodic update cluster status for {self.sink_name}",
@@ -501,11 +517,17 @@ class RobustaSink(SinkBase):
             logging.error("Failed to check run history condition", exc_info=True)
             return False
 
+    def __signal_discovery_process_stackdump(self):
+        Discovery.create_stacktrace()
+        # the max time the thread takes to check for the stack trace + stacktrace max time est.
+        time.sleep(2 * DISCOVERY_STACKTRACE_TIMEOUT_S + 10)
+
     def __discovery_watchdog(self):
         logging.info("Cluster discovery watchdog initialized")
         while self.__active:
             if not self.is_healthy():
-                logging.warning(f"Unhealthy discovery, restarting runner")
+                logging.warning("Unhealthy discovery, restarting runner")
+                self.__signal_discovery_process_stackdump()
                 StackTracer.dump()
                 # sys.exit and thread.interrupt_main doest stop robusta
                 os._exit(0)
@@ -595,14 +617,13 @@ class RobustaSink(SinkBase):
                 self.__nodes_cache[name] = new_info
             elif operation == K8sOperationType.DELETE:
                 name = new_node.metadata.name
-                self.__services_cache.pop(name, None)
+                self.__nodes_cache.pop(name, None)
                 new_info.deleted = True
 
             self.dal.publish_nodes([new_info])
             self.__discovery_metrics.on_nodes_updated(1)
 
     def __update_job(self, new_job: Job, operation: K8sOperationType):
-
         new_info = JobInfo.from_api_server(new_job, [])
         job_key = new_info.get_service_key()
         with self.services_publish_lock:

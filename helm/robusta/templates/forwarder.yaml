@@ -18,6 +18,9 @@ spec:
         {{- end }}
       labels:
         app: {{ .Release.Name }}-forwarder
+        {{- with .Values.kubewatch.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ .Release.Name }}-forwarder-service-account
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
@@ -25,10 +28,18 @@ spec:
       imagePullSecrets:
       {{- toYaml .Values.kubewatch.imagePullSecrets | nindent 6 }}
       {{- end }}
+      {{- with .Values.kubewatch.securityContext.pod }}
+      securityContext:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: kubewatch
         # this is a custom version of kubewatch built from https://github.com/aantn/kubewatch
+        {{- if .Values.kubewatch.image }}
         image: {{ .Values.kubewatch.image }}
+        {{ else }}
+        image: {{ .Values.image.registry }}/{{ .Values.kubewatch.imageName }}
+        {{- end }}
         imagePullPolicy: {{ .Values.kubewatch.imagePullPolicy }}
         env:
           - name: KW_CONFIG
@@ -41,12 +52,13 @@ spec:
         volumeMounts:
           - name: robusta-kubewatch-config
             mountPath: /config
+          {{- with .Values.kubewatch.extraVolumeMounts }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+        {{- with .Values.kubewatch.securityContext.container }}
         securityContext:
-          allowPrivilegeEscalation: false
-          capabilities: {}
-          privileged: false
-          readOnlyRootFilesystem: false
-          runAsUser: 1000    
+        {{- toYaml . | nindent 12 }}
+        {{- end }}
         resources:
           requests:
             cpu: {{ .Values.kubewatch.resources.requests.cpu }}
@@ -58,6 +70,9 @@ spec:
         - name:  robusta-kubewatch-config
           configMap:
             name: {{ .Release.Name }}-kubewatch-config
+        {{- with .Values.kubewatch.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- if .Values.kubewatch.nodeSelector }}
       nodeSelector: {{ toYaml .Values.kubewatch.nodeSelector | nindent 8 }}
       {{- end }}

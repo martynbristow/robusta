@@ -7,6 +7,7 @@ from robusta.core.discovery.discovery import (
     extract_volumes_k8,
     is_pod_finished,
     is_release_managed_by_helm,
+    should_report_pod,
 )
 from robusta.core.discovery.resource_names import ResourceNameLister
 from robusta.core.model.base_params import (
@@ -36,7 +37,7 @@ from robusta.core.model.base_params import (
     VideoEnricherParams,
 )
 from robusta.core.model.env_vars import (
-    ALERT_BUILDER_WORKERS,
+    CLUSTER_DOMAIN,
     CLUSTER_STATUS_PERIOD_SEC,
     CUSTOM_PLAYBOOKS_ROOT,
     DEFAULT_PLAYBOOKS_PIP_INSTALL,
@@ -49,6 +50,7 @@ from robusta.core.model.env_vars import (
     GIT_MAX_RETRIES,
     GRAFANA_READ_TIMEOUT,
     GRAFANA_RENDERER_URL,
+    IMAGE_REGISTRY,
     INCOMING_EVENTS_QUEUE_MAX_SIZE,
     INCOMING_REQUEST_TIME_WINDOW_SECONDS,
     INSTALLATION_NAMESPACE,

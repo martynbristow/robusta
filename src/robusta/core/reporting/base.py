@@ -17,12 +17,14 @@ from robusta.core.reporting.consts import FindingSource, FindingSubjectType, Fin
 
 class BaseBlock(BaseModel):
     hidden: bool = False
+    html_class: str = None
 
 
 class Emojis(Enum):
     Explain = "📘"
     Recommend = "🛠"
     Alert = "🚨"
+    K8Notification = "👀"
 
 
 class FindingSeverity(Enum):
@@ -51,7 +53,7 @@ class FindingSeverity(Enum):
         if self == FindingSeverity.DEBUG:
             return "🔵"
         elif self == FindingSeverity.INFO:
-            return "🟢"
+            return "⚪️"
         elif self == FindingSeverity.LOW:
             return "🟡"
         elif self == FindingSeverity.MEDIUM:

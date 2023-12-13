@@ -112,7 +112,11 @@ class ExecutionBaseEvent:
             first = False
 
     def override_finding_attributes(
-        self, title: Optional[str] = None, description: Optional[str] = None, severity: FindingSeverity = None
+        self,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        severity: FindingSeverity = None,
+        aggregation_key: Optional[str] = None,
     ):
         for sink in self.named_sinks:
             for finding in self.sink_findings[sink]:
@@ -122,6 +126,16 @@ class ExecutionBaseEvent:
                     finding.description = description
                 if severity:
                     finding.severity = severity
+                if aggregation_key:
+                    finding.aggregation_key = aggregation_key
+
+    def extend_description(self, text: str):
+        for sink in self.named_sinks:
+            for finding in self.sink_findings[sink]:
+                if not finding.description:
+                    finding.description = text
+                else:
+                    finding.description += f"\n\n{text}"
 
     @staticmethod
     def from_params(params: ExecutionEventBaseParams) -> Optional["ExecutionBaseEvent"]:

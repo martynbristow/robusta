@@ -17,6 +17,7 @@ from robusta.core.playbooks.trigger import Trigger
 from robusta.core.reporting import MarkdownBlock
 from robusta.core.reporting.base import Finding
 from robusta.core.reporting.consts import SYNC_RESPONSE_SINK
+from robusta.core.sinks.robusta import RobustaSink
 from robusta.core.sinks.robusta.dal.model_conversion import ModelConversion
 from robusta.model.alert_relabel_config import AlertRelabel
 from robusta.model.config import Registry
@@ -306,10 +307,8 @@ class PlaybooksEventHandlerImpl(PlaybooksEventHandler):
                         # Each sink has a different findings, but enrichments are shared
                         finding_copy = copy.deepcopy(finding)
                         sink.write_finding(finding_copy, self.registry.get_sinks().platform_enabled)
-
-                        sink_info = sinks_info[sink_name]
-                        sink_info.type = sink.__class__.__name__
-                        sink_info.findings_count += 1
+                        if sink.params.stop:
+                            return
 
                 except Exception:  # Failure to send to one sink shouldn't fail all
                     logging.error(f"Failed to publish finding to sink {sink_name}", exc_info=True)
@@ -334,8 +333,20 @@ class PlaybooksEventHandlerImpl(PlaybooksEventHandler):
             return True
         return all(sink.is_healthy() for sink in sinks_registry.get_all().values())
 
+    def set_cluster_active(self, active: bool):
+        logging.info(f"Setting cluster active to {active}")
+        for sink in self.registry.get_sinks().get_all().values():
+            sink.set_cluster_active(active)
+
     def handle_sigint(self, sig, frame):
         logging.info("SIGINT handler called")
+
         if not self.is_healthy():  # dump stuck trace only when the runner is unhealthy
             StackTracer.dump()
+
+        receiver = self.registry.get_receiver()
+        if receiver is not None:
+            receiver.stop()
+
+        self.set_cluster_active(False)
         sys.exit(0)

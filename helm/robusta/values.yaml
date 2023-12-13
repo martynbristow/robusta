@@ -13,9 +13,12 @@ sinksConfig: []
 clusterName: ""
 clusterZone: ""
 
+global:
+  clusterDomain: "cluster.local"
+
 automountServiceAccountToken: true
 
-# see https://docs.robusta.dev/master/user-guide/configuration.html#global-config
+# see https://docs.robusta.dev/master/user-guide/configuration.html#global-config and https://docs.robusta.dev/master/configuration/additional-settings.html#global-config
 globalConfig:
   grafana_url: ""
   grafana_api_key: ""
@@ -71,6 +74,8 @@ lightActions:
 - cordon
 - uncordon
 - rollout_restart
+- prometheus_all_available_metrics
+- prometheus_get_series
 
 # install prometheus, alert-manager, and grafana along with Robusta?
 enablePrometheusStack: false
@@ -154,8 +159,8 @@ builtinPlaybooks:
   - on_pod_oom_killed:
       rate_limit: 3600
   actions:
-  - pod_oom_killer_enricher: {}
-  - logs_enricher: {}
+  - pod_oom_killer_enricher:
+      attach_logs: true
   - pod_node_graph_enricher:
       resource_type: Memory
   - oomkilled_container_graph_enricher:
@@ -381,9 +386,17 @@ platformPlaybooks:
     - on_deployment_all_changes: {}
     - on_daemonset_all_changes: {}
     - on_statefulset_all_changes: {}
+  actions:
+    - resource_babysitter: {}
+  sinks:
+    - "robusta_ui_sink"
+- triggers:
     - on_ingress_all_changes: {}
   actions:
     - resource_babysitter: {}
+    - customise_finding:
+        title: Ingress Changes
+        aggregation_key: IngressChange
   sinks:
     - "robusta_ui_sink"
 - triggers:
@@ -425,9 +438,13 @@ platformPlaybooks:
   sinks:
     - "robusta_ui_sink"
 
+image:
+  registry: us-central1-docker.pkg.dev/genuine-flight-317411/devel
+
 # parameters for the robusta forwarder deployment
 kubewatch:
-  image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
+  image: ~  # image can be used to override image.registry/imageName
+  imageName: kubewatch:v2.5
   imagePullPolicy: IfNotPresent
   pprof: True
   resources:
@@ -441,11 +458,43 @@ kubewatch:
   annotations: {}
   nodeSelector: ~
   imagePullSecrets: []
+  config:
+    namespace: ""
+    resource:
+      deployment: true
+      replicationcontroller: false  # 0.10.12 disabled because not supported on the runner
+      replicaset: true
+      daemonset: true
+      statefulset: true
+      services: true
+      pod: true
+      job: true
+      node: true
+      hpa: true
+      clusterrole: true
+      clusterrolebinding: true
+      serviceaccount: true
+      persistentvolume: true
+      namespace: true
+      configmap: true # 0.9.17
+      secret: false       # disabled for security reasons
+      event: true  # updated on kubewatch 2.5
+      coreevent: false # added on kubewatch 2.5
+      ingress: true # full support on kubewatch 2.4 (earlier versions have ingress bugs)
+  securityContext:
+    container:
+      allowPrivilegeEscalation: false
+      capabilities: {}
+      privileged: false
+      readOnlyRootFilesystem: false
+      runAsUser: 1000
+    pod: {}
 
 # parameters for the renderer service used in robusta runner to render grafana graphs
 grafanaRenderer:
   enableContainer: false
-  image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/grafana-renderer:7
+  image: ~  # image can be used to override image.registry/imageName
+  imageName: grafana-renderer:7
   imagePullPolicy: IfNotPresent
   resources:
     requests:
@@ -453,6 +502,9 @@ grafanaRenderer:
       memory: 512Mi
     limits:
       cpu: ~
+  securityContext:
+    container:
+      privileged: false
 
 # parameters for the robusta runner service account
 runnerServiceAccount:
@@ -461,7 +513,8 @@ runnerServiceAccount:
 
 # parameters for the robusta runner
 runner:
-  image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/robusta-runner:0.0.0
+  image: ~  # image can be used to override image.registry/imageName
+  imageName: robusta-runner:0.0.0
   imagePullPolicy: IfNotPresent
   log_level: INFO
   sentry_dsn: https://53b627690db14de7b02095407596fa16@o1120648.ingest.sentry.io/6156573
@@ -480,6 +533,17 @@ runner:
   nodeSelector: ~
   customClusterRoleRules: []
   imagePullSecrets: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  serviceMonitor:
+    path: /metrics
+  securityContext:
+    container:
+      allowPrivilegeEscalation: false
+      capabilities: {}
+      privileged: false
+      readOnlyRootFilesystem: false
+    pod: {}
 
 kube-prometheus-stack:
   alertmanager:
@@ -501,12 +565,15 @@ kube-prometheus-stack:
         - name: 'null'
         - name:  'robusta'
           webhook_configs:
-            - url: 'http://robusta-runner.{{ .Release.Namespace }}.svc.cluster.local/api/alerts'
+            - url: 'http://robusta-runner.{{ .Release.Namespace }}.svc.{{ .Values.global.clusterDomain }}/api/alerts'
               send_resolved: true
     alertmanagerSpec:
       resources:
         requests:
           cpu: 50m
+          memory: 128Mi
+        limits:
+          memory: 128Mi
       storage:
         volumeClaimTemplate:
           spec:
@@ -521,6 +588,9 @@ kube-prometheus-stack:
       resources:
         requests:
           cpu: 50m
+          memory: 2Gi
+        limits:
+          memory: 2Gi
       retention: 15d
       # we set a value slightly lower than the 100Gi below
       # the retentionSize uses the suffix GB but it is really Gi units
@@ -541,6 +611,9 @@ kube-prometheus-stack:
     resources:
       requests:
         cpu: 50m
+        memory: 50Mi
+      limits:
+        memory: 50Mi
     # disable node-exporter on fargate because fargate doesn't allow daemonsets
     affinity:
       nodeAffinity:
@@ -563,8 +636,14 @@ kube-prometheus-stack:
     resources:
       requests:
         cpu: 10m
+        memory: 256Mi
+      limits:
+        memory: 256Mi
 
 rsa: ~
+  # @param existingSecret Name of existing secret containing the rsa keys
+  # NOTE: Must contain the keys `pub` and `prv`
+  # existingSecret: my-robusta-rsa-keys
 
 # custom parameters for OpenShift clusters
 openshift:

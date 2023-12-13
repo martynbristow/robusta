@@ -10,7 +10,9 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from hikaru.model.rel_1_26 import Container, EnvVar, EnvVarSource, PodSpec, ResourceRequirements, SecretKeySelector
 from prometrix import AWSPrometheusConfig, CoralogixPrometheusConfig, PrometheusAuthorization, PrometheusConfig
 from pydantic import BaseModel, ValidationError, validator
+
 from robusta.api import (
+    IMAGE_REGISTRY,
     RELEASE_NAME,
     EnrichmentAnnotation,
     ExecutionBaseEvent,
@@ -26,12 +28,12 @@ from robusta.api import (
     ScanType,
     action,
     format_unit,
-    to_kubernetes_name,
 )
 from robusta.integrations.prometheus.utils import generate_prometheus_config
 
-IMAGE: str = os.getenv("KRR_IMAGE_OVERRIDE", "us-central1-docker.pkg.dev/genuine-flight-317411/devel/krr:v1.6.0")
+IMAGE: str = os.getenv("KRR_IMAGE_OVERRIDE", f"{IMAGE_REGISTRY}/krr:v1.6.0")
 KRR_MEMORY_LIMIT: str = os.getenv("KRR_MEMORY_LIMIT", "1Gi")
+KRR_MEMORY_REQUEST: str = os.getenv("KRR_MEMORY_REQUEST", "1Gi")
 
 
 SeverityType = Literal["CRITICAL", "WARNING", "OK", "GOOD", "UNKNOWN"]
@@ -45,6 +47,7 @@ class KRRObject(BaseModel):
     namespace: str
     kind: str
     allocations: Dict[str, Dict[str, Optional[float]]]
+    warnings: List[str] = []
 
 
 class KRRRecommendedInfo(BaseModel):
@@ -169,6 +172,9 @@ def _pdf_scan_row_content_format(row: ScanReportRow) -> str:
         f"{entry['resource'].upper()} Request: "
         + f"{format_krr_value(entry['allocated']['request'])} -> "
         + f"{format_krr_value(entry['recommended']['request'])} "
+        + f"\n{entry['resource'].upper()} Limit: "
+        + f"{format_krr_value(entry['allocated']['limit'])} -> "
+        + f"{format_krr_value(entry['recommended']['limit'])} "
         + f"({priority_to_krr_severity(entry['priority']['request'])})"
         for entry in row.content
     )
@@ -309,7 +315,12 @@ def krr_scan(event: ExecutionBaseEvent, params: KRRParams):
     logging.debug(f"krr command '{python_command}'")
 
     resources = ResourceRequirements(
-        limits={"memory": (str(KRR_MEMORY_LIMIT))},
+        limits={
+            "memory": (str(KRR_MEMORY_LIMIT)),
+        },
+        requests={
+            "memory": (str(KRR_MEMORY_REQUEST)),
+        },
     )
     spec = PodSpec(
         serviceAccountName=params.serviceAccountName,
@@ -341,15 +352,15 @@ def krr_scan(event: ExecutionBaseEvent, params: KRRParams):
     except json.JSONDecodeError:
         logging.error(f"*KRR scan job failed. Expecting json result.*\n\n Result:\n{logs}")
         return
-    except ValidationError as e:
-        logging.error(f"*KRR scan job failed. Result format issue.*\n\n {e}")
+    except ValidationError:
+        logging.error("*KRR scan job failed. Result format issue.*\n\n", exc_info=True)
         logging.error(f"\n {logs}")
         return
     except Exception as e:
         if str(e) == "Failed to reach wait condition":
-            logging.error(f"*KRR scan job failed. The job wait condition timed out ({params.timeout}s)*")
+            logging.error(f"*KRR scan job failed. The job wait condition timed out ({params.timeout}s)*", exc_info=True)
         else:
-            logging.error(f"*KRR scan job unexpected error.*\n {e}")
+            logging.error(f"*KRR scan job unexpected error.*\n {e}", exc_info=True)
         return
 
     scan_block = ScanReportBlock(
@@ -387,6 +398,7 @@ def krr_scan(event: ExecutionBaseEvent, params: KRRParams):
                         "metric": scan.metrics.get(resource).dict() if scan.metrics.get(resource) else {},
                         "description": krr_scan.description,
                         "strategy": krr_scan.strategy.dict() if krr_scan.strategy else None,
+                        "warnings": scan.object.warnings,
                     }
                     for resource in krr_scan.resources
                 ],

@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import random
 import subprocess
 import time
@@ -7,14 +8,13 @@ import traceback
 import uuid
 from typing import Dict, List, Optional, Union
 
+import certifi
 import typer
 import yaml
 from hikaru.model.rel_1_26 import Container, Job, JobSpec, ObjectMeta, PodSpec, PodTemplateSpec
 from kubernetes import client, config
 from pydantic import BaseModel, Extra
 
-import certifi
-import os
 from robusta._version import __version__
 from robusta.cli.auth import RSAKeyPair
 from robusta.cli.auth import app as auth_commands
@@ -32,6 +32,7 @@ from robusta.core.sinks.msteams.msteams_sink_params import MsTeamsSinkConfigWrap
 from robusta.core.sinks.robusta.robusta_sink_params import RobustaSinkConfigWrapper, RobustaSinkParams
 from robusta.core.sinks.slack.slack_sink_params import SlackSinkConfigWrapper, SlackSinkParams
 from robusta.integrations.prometheus.utils import AlertManagerDiscovery
+
 ADDITIONAL_CERTIFICATE: str = os.environ.get("CERTIFICATE", "")
 # TODO - separate shared classes to a separated shared repo, to remove dependencies between the cli and runner
 
@@ -216,9 +217,10 @@ def gen_config(
         token = json.loads(base64.b64decode(robusta_api_key))
         account_id = token.get("account_id", account_id)
 
-        sinks_config.append(
+        # Make sure the UI sink (if enabled) is the first one. See MAIN-1088.
+        sinks_config = [
             RobustaSinkConfigWrapper(robusta_sink=RobustaSinkParams(name="robusta_ui_sink", token=robusta_api_key))
-        )
+        ] + sinks_config
         enable_platform_playbooks = True
         disable_cloud_routing = False
 
@@ -286,6 +288,13 @@ def gen_config(
                 "value": backend_profile.robusta_telemetry_endpoint,
             },
         ]
+
+    if is_small_cluster:
+        setattr(values, "kube-prometheus-stack", {})
+        kube_stack = getattr(values, "kube-prometheus-stack")
+        kube_stack["prometheus"] = {
+            "prometheusSpec": {"resources": {"requests": {"memory": "300Mi"}, "limits": {"memory": "300Mi"}}},
+        }
 
     write_values_file(output_path, values)
 
@@ -413,6 +422,7 @@ def demo_alert(
         help="Additional alert labels. Comma separated list. For example: env=prod,team=infra ",
     ),
     kube_config: str = typer.Option(None, help="Kube config file path override."),
+    image: str = typer.Option("curlimages/curl", help="Docker image with curl support."),
 ):
     """
     Create a demo alert on AlertManager.
@@ -424,7 +434,7 @@ def demo_alert(
         alertmanager_url = AlertManagerDiscovery.find_alert_manager_url()
         if not alertmanager_url:
             typer.secho(
-                "Alertmanager service could not be auto-discovered. " "Please use the --alertmanager_url parameter",
+                "Alertmanager service could not be auto-discovered. " "Please use the --alertmanager-url parameter",
                 fg="red",
             )
             return
@@ -489,7 +499,7 @@ def demo_alert(
                     containers=[
                         Container(
                             name="alert-curl",
-                            image="curlimages/curl",
+                            image=image,
                             command=command,
                         )
                     ],
